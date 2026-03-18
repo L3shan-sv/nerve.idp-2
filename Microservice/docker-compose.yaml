@@ -1,0 +1,434 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────
+# Nerve IDP — Local Development Stack
+#
+# Starts: PostgreSQL 15, PgBouncer, Redis 7 (+ Sentinel HA),
+#         Neo4j 5, HashiCorp Vault, Temporal, Temporal UI,
+#         Prometheus, Grafana, Jaeger, OpenTelemetry Collector
+#
+# Usage:
+#   docker compose up -d              # start everything
+#   docker compose up -d postgres     # start specific service
+#   docker compose logs -f gateway    # follow logs
+#   docker compose down -v            # stop and remove volumes
+# ─────────────────────────────────────────────────────────
+
+networks:
+  nerve:
+    driver: bridge
+
+volumes:
+  postgres_data:
+  redis_data:
+  neo4j_data:
+  neo4j_logs:
+  vault_data:
+  temporal_data:
+  prometheus_data:
+  grafana_data:
+
+x-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+
+  # ─────────────────────────────────────────
+  # PostgreSQL 15 + pgvector
+  # ─────────────────────────────────────────
+  postgres:
+    image: pgvector/pgvector:pg15
+    container_name: nerve-postgres
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: nerve
+      POSTGRES_USER: nerve
+      POSTGRES_PASSWORD: nerve_dev_secret
+      # Tune for local dev — not production values
+      POSTGRES_INITDB_ARGS: "--encoding=UTF-8 --lc-collate=C --lc-ctype=C"
+    command: >
+      postgres
+        -c max_connections=200
+        -c shared_buffers=256MB
+        -c effective_cache_size=768MB
+        -c maintenance_work_mem=64MB
+        -c checkpoint_completion_target=0.9
+        -c wal_buffers=16MB
+        -c default_statistics_target=100
+        -c random_page_cost=1.1
+        -c effective_io_concurrency=200
+        -c work_mem=4MB
+        -c min_wal_size=1GB
+        -c max_wal_size=4GB
+        -c log_statement=ddl
+        -c log_duration=off
+        -c log_min_duration_statement=1000
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./infra/docker/postgres/init.sql:/docker-entrypoint-initdb.d/01-init.sql:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U nerve -d nerve"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nerve
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # PgBouncer — connection pooling
+  # Non-negotiable from day one.
+  # Without this: 150 concurrent user wall.
+  # With this: 2,000 concurrent users.
+  # ─────────────────────────────────────────
+  pgbouncer:
+    image: bitnami/pgbouncer:1.22.1
+    container_name: nerve-pgbouncer
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      POSTGRESQL_HOST: postgres
+      POSTGRESQL_PORT: 5432
+      POSTGRESQL_DATABASE: nerve
+      POSTGRESQL_USERNAME: nerve
+      POSTGRESQL_PASSWORD: nerve_dev_secret
+      PGBOUNCER_DATABASE: nerve
+      PGBOUNCER_PORT: 6432
+      # Transaction mode — critical for FastAPI async connection reuse
+      PGBOUNCER_POOL_MODE: transaction
+      PGBOUNCER_MAX_CLIENT_CONN: 1000
+      PGBOUNCER_DEFAULT_POOL_SIZE: 20
+      PGBOUNCER_MIN_POOL_SIZE: 5
+      PGBOUNCER_RESERVE_POOL_SIZE: 5
+      PGBOUNCER_RESERVE_POOL_TIMEOUT: 3
+      PGBOUNCER_SERVER_IDLE_TIMEOUT: 600
+      PGBOUNCER_CLIENT_IDLE_TIMEOUT: 0
+      PGBOUNCER_LOG_CONNECTIONS: 0
+      PGBOUNCER_LOG_DISCONNECTIONS: 0
+    ports:
+      - "6432:6432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -h localhost -p 6432 -U nerve"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nerve
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # Redis 7 — Primary
+  # Serves as: cache, session store, Celery broker, Redis Streams event bus
+  # ─────────────────────────────────────────
+  redis:
+    image: redis:7.2-alpine
+    container_name: nerve-redis
+    restart: unless-stopped
+    command: >
+      redis-server
+        --requirepass nerve_redis_secret
+        --maxmemory 512mb
+        --maxmemory-policy allkeys-lru
+        --save 900 1
+        --save 300 10
+        --save 60 10000
+        --loglevel notice
+        --tcp-backlog 511
+        --ulimit nofile=65535:65535
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "-a", "nerve_redis_secret", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - nerve
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # Redis Sentinel 1
+  # HA: 1 primary, 2 replicas, 3 sentinels
+  # Sentinels monitor the primary and elect a new one on failure
+  # ─────────────────────────────────────────
+  redis-replica-1:
+    image: redis:7.2-alpine
+    container_name: nerve-redis-replica-1
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      redis-server
+        --requirepass nerve_redis_secret
+        --masterauth nerve_redis_secret
+        --replicaof redis 6379
+        --replica-read-only yes
+    networks:
+      - nerve
+    logging: *default-logging
+
+  redis-replica-2:
+    image: redis:7.2-alpine
+    container_name: nerve-redis-replica-2
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+    command: >
+      redis-server
+        --requirepass nerve_redis_secret
+        --masterauth nerve_redis_secret
+        --replicaof redis 6379
+        --replica-read-only yes
+    networks:
+      - nerve
+    logging: *default-logging
+
+  redis-sentinel-1:
+    image: redis:7.2-alpine
+    container_name: nerve-sentinel-1
+    restart: unless-stopped
+    depends_on:
+      - redis-replica-1
+      - redis-replica-2
+    command: >
+      sh -c "
+        echo 'sentinel monitor nerve-master redis 6379 2' > /tmp/sentinel.conf &&
+        echo 'sentinel auth-pass nerve-master nerve_redis_secret' >> /tmp/sentinel.conf &&
+        echo 'sentinel down-after-milliseconds nerve-master 5000' >> /tmp/sentinel.conf &&
+        echo 'sentinel failover-timeout nerve-master 60000' >> /tmp/sentinel.conf &&
+        echo 'sentinel parallel-syncs nerve-master 1' >> /tmp/sentinel.conf &&
+        redis-sentinel /tmp/sentinel.conf
+      "
+    ports:
+      - "26379:26379"
+    networks:
+      - nerve
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # Neo4j 5 — Blast radius dependency graph
+  # ─────────────────────────────────────────
+  neo4j:
+    image: neo4j:5.18-community
+    container_name: nerve-neo4j
+    restart: unless-stopped
+    environment:
+      NEO4J_AUTH: neo4j/nerve_neo4j_secret
+      NEO4J_PLUGINS: '["apoc"]'
+      NEO4J_dbms_security_procedures_unrestricted: apoc.*
+      NEO4J_dbms_security_procedures_allowlist: apoc.*
+      # Heap sizing — critical for traversal performance on large graphs
+      NEO4J_server_memory_heap_initial__size: 512m
+      NEO4J_server_memory_heap_max__size: 1G
+      NEO4J_server_memory_pagecache__size: 512m
+      NEO4J_dbms_logs_query_enabled: INFO
+      NEO4J_dbms_logs_query_threshold: 1000ms
+    ports:
+      - "7474:7474"   # Browser UI
+      - "7687:7687"   # Bolt protocol
+    volumes:
+      - neo4j_data:/data
+      - neo4j_logs:/logs
+      - ./infra/docker/neo4j/init.cypher:/var/lib/neo4j/import/init.cypher:ro
+    healthcheck:
+      test: ["CMD-SHELL", "wget -O /dev/null -q http://localhost:7474 || exit 1"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks:
+      - nerve
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # HashiCorp Vault — dev mode
+  # NOTE: Dev mode only. No persistence between restarts.
+  # Production: use Vault with proper storage backend + HA.
+  # ─────────────────────────────────────────
+  vault:
+    image: hashicorp/vault:1.16
+    container_name: nerve-vault
+    restart: unless-stopped
+    cap_add:
+      - IPC_LOCK
+    environment:
+      VAULT_DEV_ROOT_TOKEN_ID: nerve-vault-dev-token
+      VAULT_DEV_LISTEN_ADDRESS: 0.0.0.0:8200
+      VAULT_ADDR: http://0.0.0.0:8200
+    command: vault server -dev
+    ports:
+      - "8200:8200"
+    volumes:
+      - vault_data:/vault/data
+      - ./infra/docker/vault/init.sh:/docker-entrypoint-init.d/init.sh:ro
+    healthcheck:
+      test: ["CMD-SHELL", "vault status -address=http://localhost:8200 || exit 1"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nerve
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # Temporal — workflow engine
+  # Used for: IaC apply, scaffold, runbooks, chaos approval
+  # ─────────────────────────────────────────
+  temporal:
+    image: temporalio/auto-setup:1.24.2
+    container_name: nerve-temporal
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      - DB=postgresql
+      - DB_PORT=5432
+      - POSTGRES_USER=nerve
+      - POSTGRES_PWD=nerve_dev_secret
+      - POSTGRES_SEEDS=postgres
+      - DYNAMIC_CONFIG_FILE_PATH=config/dynamicconfig/development-sql.yaml
+      - TEMPORAL_BROADCAST_ADDRESS=temporal
+    ports:
+      - "7233:7233"
+    volumes:
+      - ./infra/docker/temporal/dynamicconfig:/etc/temporal/config/dynamicconfig:ro
+    healthcheck:
+      test: ["CMD", "temporal", "workflow", "list", "--namespace", "default", "--address", "localhost:7233"]
+      interval: 10s
+      timeout: 10s
+      retries: 20
+      start_period: 30s
+    networks:
+      - nerve
+    logging: *default-logging
+
+  temporal-ui:
+    image: temporalio/ui:2.27.3
+    container_name: nerve-temporal-ui
+    restart: unless-stopped
+    depends_on:
+      - temporal
+    environment:
+      TEMPORAL_ADDRESS: temporal:7233
+      TEMPORAL_CORS_ORIGINS: http://localhost:3000,http://localhost:5173
+    ports:
+      - "8088:8080"
+    networks:
+      - nerve
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # OpenTelemetry Collector
+  # Receives traces/metrics from all services
+  # Exports: traces → Jaeger, metrics → Prometheus
+  # ─────────────────────────────────────────
+  otel-collector:
+    image: otel/opentelemetry-collector-contrib:0.99.0
+    container_name: nerve-otel-collector
+    restart: unless-stopped
+    command: ["--config=/etc/otel/config.yaml"]
+    volumes:
+      - ./infra/docker/otel/config.yaml:/etc/otel/config.yaml:ro
+    ports:
+      - "4317:4317"   # OTLP gRPC
+      - "4318:4318"   # OTLP HTTP
+      - "8889:8889"   # Prometheus metrics exporter
+    networks:
+      - nerve
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # Jaeger — distributed tracing
+  # ─────────────────────────────────────────
+  jaeger:
+    image: jaegertracing/all-in-one:1.57
+    container_name: nerve-jaeger
+    restart: unless-stopped
+    environment:
+      COLLECTOR_OTLP_ENABLED: "true"
+    ports:
+      - "16686:16686"   # Jaeger UI
+      - "14268:14268"   # HTTP collector
+    networks:
+      - nerve
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # Prometheus — metrics
+  # ─────────────────────────────────────────
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: nerve-prometheus
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/prometheus/prometheus.yaml"
+      - "--storage.tsdb.path=/prometheus"
+      - "--storage.tsdb.retention.time=15d"
+      - "--web.enable-lifecycle"
+      - "--web.enable-admin-api"
+    volumes:
+      - ./infra/docker/prometheus/prometheus.yaml:/etc/prometheus/prometheus.yaml:ro
+      - ./infra/docker/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    ports:
+      - "9090:9090"
+    networks:
+      - nerve
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # Grafana — dashboards
+  # ─────────────────────────────────────────
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: nerve-grafana
+    restart: unless-stopped
+    depends_on:
+      - prometheus
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: nerve_grafana_secret
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_SERVER_DOMAIN: localhost
+      GF_INSTALL_PLUGINS: grafana-piechart-panel
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./infra/docker/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infra/docker/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports:
+      - "3000:3000"
+    networks:
+      - nerve
+    logging: *default-logging
+
+  # ─────────────────────────────────────────
+  # Alertmanager
+  # Routes: burn rate alerts → Slack/PagerDuty
+  #         deploy freeze → Nerve freeze webhook
+  # ─────────────────────────────────────────
+  alertmanager:
+    image: prom/alertmanager:v0.27.0
+    container_name: nerve-alertmanager
+    restart: unless-stopped
+    command:
+      - "--config.file=/etc/alertmanager/alertmanager.yaml"
+      - "--storage.path=/alertmanager"
+    volumes:
+      - ./infra/docker/alertmanager/alertmanager.yaml:/etc/alertmanager/alertmanager.yaml:ro
+    ports:
+      - "9093:9093"
+    networks:
+      - nerve
+    logging: *default-logging
