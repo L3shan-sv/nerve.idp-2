@@ -1,0 +1,255 @@
+version: "3.9"
+
+# ─────────────────────────────────────────────────────────
+# Nerve IDP — Phase 2 Service Overlay
+#
+# Extends docker-compose.yaml with application services.
+# Usage:
+#   docker compose -f docker-compose.yaml -f docker-compose.phase2.yaml up -d
+# ─────────────────────────────────────────────────────────
+
+networks:
+  nerve:
+    driver: bridge
+
+services:
+
+  # ─────────────────────────────────────────
+  # OPA — Policy evaluation sidecar
+  # Runs standalone in dev (sidecar in k8s)
+  # ─────────────────────────────────────────
+  opa:
+    image: openpolicyagent/opa:0.64.1-rootless
+    container_name: nerve-opa
+    restart: unless-stopped
+    command:
+      - "run"
+      - "--server"
+      - "--addr=0.0.0.0:8181"
+      - "--log-level=info"
+      - "--log-format=json"
+      - "--watch"
+      - "/policies"
+    volumes:
+      - ./policies/rego:/policies:ro
+    ports:
+      - "8181:8181"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8181/health || exit 1"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+    networks:
+      - nerve
+
+  # ─────────────────────────────────────────
+  # Catalog service — port 8001
+  # ─────────────────────────────────────────
+  catalog:
+    build:
+      context: backend/services/catalog
+      dockerfile: Dockerfile
+    container_name: nerve-catalog
+    restart: unless-stopped
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      neo4j:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://nerve_app:nerve_app_secret@pgbouncer:6432/nerve
+      REDIS_URL: redis://:nerve_redis_secret@redis:6379/0
+      NEO4J_URI: bolt://neo4j:7687
+      NEO4J_USER: neo4j
+      NEO4J_PASSWORD: nerve_neo4j_secret
+      ENVIRONMENT: development
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "8001:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nerve
+
+  # ─────────────────────────────────────────
+  # Golden Path Enforcer — port 8002
+  # Depends on OPA being healthy (startup gate)
+  # ─────────────────────────────────────────
+  enforcer:
+    build:
+      context: backend/services/enforcer
+      dockerfile: Dockerfile
+    container_name: nerve-enforcer
+    restart: unless-stopped
+    depends_on:
+      opa:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+      catalog:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://nerve_app:nerve_app_secret@pgbouncer:6432/nerve
+      REDIS_URL: redis://:nerve_redis_secret@redis:6379/0
+      OPA_URL: http://opa:8181
+      CATALOG_SERVICE_URL: http://catalog:8000
+      ENVIRONMENT: development
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "8002:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 15
+      start_period: 30s  # Give OPA time to load policies
+    networks:
+      - nerve
+
+  # ─────────────────────────────────────────
+  # Pipeline service — port 8003
+  # ─────────────────────────────────────────
+  pipeline:
+    build:
+      context: backend/services/pipeline
+      dockerfile: Dockerfile
+    container_name: nerve-pipeline
+    restart: unless-stopped
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      catalog:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://nerve_app:nerve_app_secret@pgbouncer:6432/nerve
+      REDIS_URL: redis://:nerve_redis_secret@redis:6379/0
+      CATALOG_SERVICE_URL: http://catalog:8000
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_ORG: ${GITHUB_ORG:-}
+      ENVIRONMENT: development
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "8003:8000"
+    networks:
+      - nerve
+
+  # ─────────────────────────────────────────
+  # DORA worker — Celery worker
+  # ─────────────────────────────────────────
+  dora-worker:
+    build:
+      context: backend/services/pipeline
+      dockerfile: Dockerfile.worker
+    container_name: nerve-dora-worker
+    restart: unless-stopped
+    depends_on:
+      redis:
+        condition: service_healthy
+      pgbouncer:
+        condition: service_healthy
+    command: celery -A app.workers.dora worker --loglevel=info --queues=dora --concurrency=2
+    environment:
+      DATABASE_URL: postgresql+asyncpg://nerve_app:nerve_app_secret@pgbouncer:6432/nerve
+      DATABASE_URL_SYNC: postgresql+psycopg2://nerve_app:nerve_app_secret@pgbouncer:6432/nerve
+      REDIS_URL: redis://:nerve_redis_secret@redis:6379/0
+      ENVIRONMENT: development
+    networks:
+      - nerve
+
+  # ─────────────────────────────────────────
+  # Temporal workers
+  # One worker per task queue
+  # ─────────────────────────────────────────
+  temporal-worker-scaffold:
+    build:
+      context: workflows/temporal
+      dockerfile: Dockerfile.worker
+    container_name: nerve-temporal-worker-scaffold
+    restart: unless-stopped
+    depends_on:
+      temporal:
+        condition: service_healthy
+    command: python worker.py --queue nerve-scaffold
+    environment:
+      TEMPORAL_HOST: temporal
+      TEMPORAL_PORT: 7233
+      DATABASE_URL: postgresql+asyncpg://nerve_app:nerve_app_secret@pgbouncer:6432/nerve
+      REDIS_URL: redis://:nerve_redis_secret@redis:6379/0
+      CATALOG_SERVICE_URL: http://catalog:8000
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_ORG: ${GITHUB_ORG:-}
+      VAULT_URL: http://vault:8200
+      VAULT_TOKEN: nerve-vault-dev-token
+    networks:
+      - nerve
+
+  temporal-worker-iac:
+    build:
+      context: workflows/temporal
+      dockerfile: Dockerfile.worker
+    container_name: nerve-temporal-worker-iac
+    restart: unless-stopped
+    depends_on:
+      temporal:
+        condition: service_healthy
+    command: python worker.py --queue nerve-iac
+    environment:
+      TEMPORAL_HOST: temporal
+      TEMPORAL_PORT: 7233
+      DATABASE_URL: postgresql+asyncpg://nerve_app:nerve_app_secret@pgbouncer:6432/nerve
+      REDIS_URL: redis://:nerve_redis_secret@redis:6379/0
+      CATALOG_SERVICE_URL: http://catalog:8000
+      TERRAFORM_CLOUD_TOKEN: ${TERRAFORM_CLOUD_TOKEN:-}
+    networks:
+      - nerve
+
+  # ─────────────────────────────────────────
+  # Gateway — updated to route to real services
+  # ─────────────────────────────────────────
+  gateway:
+    build:
+      context: backend/gateway
+      dockerfile: Dockerfile
+    container_name: nerve-gateway
+    restart: unless-stopped
+    depends_on:
+      pgbouncer:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      catalog:
+        condition: service_healthy
+      enforcer:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+asyncpg://nerve_app:nerve_app_secret@pgbouncer:6432/nerve
+      REDIS_URL: redis://:nerve_redis_secret@redis:6379/0
+      OPA_URL: http://opa:8181
+      CATALOG_SERVICE_URL: http://catalog:8000
+      ENFORCER_SERVICE_URL: http://enforcer:8000
+      PIPELINE_SERVICE_URL: http://pipeline:8000
+      TEMPORAL_HOST: temporal
+      VAULT_URL: http://vault:8200
+      VAULT_TOKEN: nerve-vault-dev-token
+      JWT_SECRET_KEY: ${JWT_SECRET_KEY:-nerve-jwt-dev-secret-change-in-production}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      GITHUB_TOKEN: ${GITHUB_TOKEN:-}
+      GITHUB_ORG: ${GITHUB_ORG:-}
+      ENVIRONMENT: development
+      OTEL_EXPORTER_OTLP_ENDPOINT: http://otel-collector:4317
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+    networks:
+      - nerve

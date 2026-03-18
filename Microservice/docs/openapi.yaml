@@ -1,0 +1,3239 @@
+openapi: 3.1.0
+info:
+  title: Nerve IDP API
+  version: 1.0.0
+  description: |
+    Internal Developer Platform API — contract-first specification.
+    All backend services implement against this spec.
+    All frontend React Query hooks are typed against these schemas.
+  contact:
+    name: Platform Engineering
+  license:
+    name: Private
+
+servers:
+  - url: http://localhost:8000/api/v1
+    description: Local development
+  - url: https://nerve.internal/api/v1
+    description: Production
+
+tags:
+  - name: catalog
+    description: Service catalog — source of truth for all services
+  - name: deploy
+    description: Golden path enforcer and deploy lifecycle
+  - name: scaffold
+    description: App scaffolding and golden path service creation
+  - name: iac
+    description: Infrastructure as Code self-service
+  - name: pipelines
+    description: CI/CD pipeline visibility
+  - name: observability
+    description: DORA metrics, error budgets, maturity scores
+  - name: cost
+    description: Cost intelligence per service and team
+  - name: security
+    description: Security posture, CVEs, SBOM
+  - name: blast-radius
+    description: Dependency graph and blast radius analysis
+  - name: fleet
+    description: Fleet operations — bulk actions across service collections
+  - name: runbooks
+    description: Self-healing runbooks and remediation workflows
+  - name: ai
+    description: AI ops co-pilot
+  - name: docs
+    description: TechDocs as code
+  - name: chaos
+    description: Chaos engineering experiments
+  - name: teams
+    description: Teams, quotas, and resource management
+  - name: health
+    description: Platform health
+
+# ─────────────────────────────────────────────
+# PATHS
+# ─────────────────────────────────────────────
+paths:
+
+  # ── Health ──────────────────────────────────
+  /health:
+    get:
+      tags: [health]
+      summary: Gateway liveness check
+      operationId: healthCheck
+      security: []
+      responses:
+        "200":
+          description: Gateway is live
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/HealthResponse"
+
+  /health/ready:
+    get:
+      tags: [health]
+      summary: Gateway readiness check (all upstream deps healthy)
+      operationId: readinessCheck
+      security: []
+      responses:
+        "200":
+          description: All dependencies ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+        "503":
+          description: One or more dependencies not ready
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ReadinessResponse"
+
+  # ── Auth ─────────────────────────────────────
+  /auth/token:
+    post:
+      tags: [health]
+      summary: Issue JWT token
+      operationId: issueToken
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TokenRequest"
+      responses:
+        "200":
+          description: JWT issued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  /auth/refresh:
+    post:
+      tags: [health]
+      summary: Refresh JWT token
+      operationId: refreshToken
+      responses:
+        "200":
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TokenResponse"
+          description: Token refreshed
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+  # ── Service Catalog ───────────────────────────
+  /services:
+    get:
+      tags: [catalog]
+      summary: List all services with optional filters
+      operationId: listServices
+      parameters:
+        - $ref: "#/components/parameters/TeamFilter"
+        - $ref: "#/components/parameters/LanguageFilter"
+        - $ref: "#/components/parameters/HealthFilter"
+        - $ref: "#/components/parameters/SearchQuery"
+        - $ref: "#/components/parameters/PageParam"
+        - $ref: "#/components/parameters/LimitParam"
+        - name: sort_by
+          in: query
+          schema:
+            type: string
+            enum: [name, maturity_score, error_budget, last_deploy_at, team]
+            default: name
+        - name: sort_dir
+          in: query
+          schema:
+            type: string
+            enum: [asc, desc]
+            default: asc
+      responses:
+        "200":
+          description: Paginated service list
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceListResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+
+    post:
+      tags: [catalog]
+      summary: Register a new service in the catalog
+      operationId: registerService
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServiceRegistration"
+      responses:
+        "201":
+          description: Service registered
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Service"
+        "409":
+          description: Service name already exists
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /services/{serviceId}:
+    get:
+      tags: [catalog]
+      summary: Get full service detail
+      operationId: getService
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      responses:
+        "200":
+          description: Full service detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceDetail"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+    patch:
+      tags: [catalog]
+      summary: Update service metadata
+      operationId: updateService
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServiceUpdate"
+      responses:
+        "200":
+          description: Updated service
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Service"
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+    delete:
+      tags: [catalog]
+      summary: Deregister a service (soft delete)
+      operationId: deleteService
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      responses:
+        "204":
+          description: Service deregistered
+        "404":
+          $ref: "#/components/responses/NotFound"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /services/{serviceId}/slo:
+    get:
+      tags: [catalog]
+      summary: Get SLO definition for a service
+      operationId: getServiceSlo
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      responses:
+        "200":
+          description: SLO definition
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SloDefinition"
+
+    put:
+      tags: [catalog]
+      summary: Create or update SLO definition
+      operationId: upsertServiceSlo
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SloDefinitionInput"
+      responses:
+        "200":
+          description: SLO updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SloDefinition"
+
+  /services/{serviceId}/changelog:
+    get:
+      tags: [catalog]
+      summary: Get release changelog for a service
+      operationId: getServiceChangelog
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+        - name: limit
+          in: query
+          schema:
+            type: integer
+            default: 10
+      responses:
+        "200":
+          description: Release changelog entries
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChangelogEntry"
+
+  # ── Blast Radius ──────────────────────────────
+  /services/{serviceId}/blast-radius:
+    get:
+      tags: [blast-radius]
+      summary: Compute blast radius via Neo4j traversal (up to 5 hops)
+      operationId: getBlastRadius
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+        - name: hops
+          in: query
+          schema:
+            type: integer
+            minimum: 1
+            maximum: 5
+            default: 5
+      responses:
+        "200":
+          description: Dependency subgraph with impact assessment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/BlastRadiusResponse"
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /services/{serviceId}/dependency-health:
+    get:
+      tags: [blast-radius]
+      summary: Pre-deploy dependency health risk score
+      operationId: getDependencyHealth
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      responses:
+        "200":
+          description: Upstream dependency health risk assessment
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DependencyHealthResponse"
+
+  # ── Deploy / Golden Path Enforcer ─────────────
+  /services/{serviceId}/deploy:
+    post:
+      tags: [deploy]
+      summary: Submit a deploy — runs OPA evaluation, blocks if score < 80
+      operationId: submitDeploy
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DeployRequest"
+      responses:
+        "202":
+          description: Deploy accepted and queued
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeployResponse"
+        "400":
+          description: Invalid deploy request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+        "403":
+          description: OPA compliance check failed (score < 80)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComplianceFailureResponse"
+        "423":
+          description: Service deploy frozen (error budget exhausted)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeployFrozenResponse"
+
+  /services/{serviceId}/deploy/{deployId}:
+    get:
+      tags: [deploy]
+      summary: Poll deploy status
+      operationId: getDeployStatus
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+        - name: deployId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Deploy status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DeployStatus"
+
+  /services/{serviceId}/compliance:
+    get:
+      tags: [deploy]
+      summary: Run OPA compliance evaluation without deploying
+      operationId: evaluateCompliance
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+        - name: version
+          in: query
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Compliance evaluation result
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ComplianceReport"
+
+  /services/{serviceId}/deploy/history:
+    get:
+      tags: [deploy]
+      summary: Get deploy history for a service
+      operationId: getDeployHistory
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Deploy history
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DeployHistoryEntry"
+
+  # ── Scaffold ──────────────────────────────────
+  /scaffold:
+    post:
+      tags: [scaffold]
+      summary: Scaffold a new golden-path service (triggers Temporal workflow)
+      operationId: scaffoldService
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ScaffoldRequest"
+      responses:
+        "202":
+          description: Scaffold workflow started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScaffoldResponse"
+        "400":
+          description: Invalid scaffold request
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorResponse"
+
+  /scaffold/{workflowId}:
+    get:
+      tags: [scaffold]
+      summary: Poll scaffold workflow status
+      operationId: getScaffoldStatus
+      parameters:
+        - name: workflowId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Scaffold workflow status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ScaffoldStatus"
+
+  /scaffold/templates:
+    get:
+      tags: [scaffold]
+      summary: List available scaffold templates with versions
+      operationId: listScaffoldTemplates
+      responses:
+        "200":
+          description: Available templates
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ScaffoldTemplate"
+
+  # ── IaC ───────────────────────────────────────
+  /iac/requests:
+    get:
+      tags: [iac]
+      summary: List IaC change requests
+      operationId: listIacRequests
+      parameters:
+        - $ref: "#/components/parameters/TeamFilter"
+        - name: status
+          in: query
+          schema:
+            type: string
+            enum: [pending, approved, applying, applied, failed, rejected]
+      responses:
+        "200":
+          description: IaC requests
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/IacRequest"
+
+    post:
+      tags: [iac]
+      summary: Submit an IaC change request (triggers plan preview)
+      operationId: submitIacRequest
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/IacRequestInput"
+      responses:
+        "202":
+          description: IaC plan started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IacRequest"
+        "402":
+          description: Team quota would be exceeded
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/QuotaExceededResponse"
+
+  /iac/requests/{requestId}/approve:
+    post:
+      tags: [iac]
+      summary: Approve IaC request — triggers Temporal apply workflow
+      operationId: approveIacRequest
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "202":
+          description: Apply workflow started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IacRequest"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /iac/requests/{requestId}/reject:
+    post:
+      tags: [iac]
+      summary: Reject IaC request
+      operationId: rejectIacRequest
+      parameters:
+        - name: requestId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+      responses:
+        "200":
+          description: Request rejected
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IacRequest"
+
+  # ── Pipelines ─────────────────────────────────
+  /services/{serviceId}/pipelines:
+    get:
+      tags: [pipelines]
+      summary: List pipeline runs for a service
+      operationId: listPipelineRuns
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+        - $ref: "#/components/parameters/LimitParam"
+      responses:
+        "200":
+          description: Pipeline run list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PipelineRun"
+
+  /services/{serviceId}/pipelines/{runId}:
+    get:
+      tags: [pipelines]
+      summary: Get pipeline run detail with stages
+      operationId: getPipelineRun
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+        - name: runId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Pipeline run detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/PipelineRunDetail"
+
+  # ── Observability: DORA ───────────────────────
+  /metrics/dora:
+    get:
+      tags: [observability]
+      summary: DORA metrics — platform-wide or per team
+      operationId: getDoraMetrics
+      parameters:
+        - $ref: "#/components/parameters/TeamFilter"
+        - $ref: "#/components/parameters/WindowParam"
+      responses:
+        "200":
+          description: DORA metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DoraMetrics"
+
+  /services/{serviceId}/metrics/dora:
+    get:
+      tags: [observability]
+      summary: DORA metrics for a specific service
+      operationId: getServiceDoraMetrics
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+        - $ref: "#/components/parameters/WindowParam"
+      responses:
+        "200":
+          description: Service DORA metrics
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/DoraMetrics"
+
+  # ── Observability: Error Budget ───────────────
+  /services/{serviceId}/error-budget:
+    get:
+      tags: [observability]
+      summary: Current error budget state with multi-window burn rate
+      operationId: getErrorBudget
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      responses:
+        "200":
+          description: Error budget state
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ErrorBudget"
+
+  /services/{serviceId}/error-budget/freeze:
+    post:
+      tags: [observability]
+      summary: Freeze deploys for a service (webhook called by Alertmanager)
+      operationId: freezeServiceDeploys
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FreezeRequest"
+      responses:
+        "200":
+          description: Service deploy frozen
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FreezeResponse"
+
+  /services/{serviceId}/error-budget/unfreeze:
+    post:
+      tags: [observability]
+      summary: Manually unfreeze deploys (SRE override with audit log entry)
+      operationId: unfreezeServiceDeploys
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              type: object
+              required: [reason]
+              properties:
+                reason:
+                  type: string
+      responses:
+        "200":
+          description: Service unfrozen
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FreezeResponse"
+
+  # ── Observability: Maturity ───────────────────
+  /services/{serviceId}/maturity:
+    get:
+      tags: [observability]
+      summary: Maturity score breakdown across 6 pillars
+      operationId: getMaturityScore
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      responses:
+        "200":
+          description: Maturity score detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/MaturityScore"
+
+  /teams/{teamId}/maturity:
+    get:
+      tags: [observability]
+      summary: Team maturity leaderboard
+      operationId: getTeamMaturity
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Team maturity aggregate
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamMaturity"
+
+  # ── Cost ──────────────────────────────────────
+  /services/{serviceId}/cost:
+    get:
+      tags: [cost]
+      summary: Per-service cloud spend with anomaly flag
+      operationId: getServiceCost
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+        - $ref: "#/components/parameters/WindowParam"
+      responses:
+        "200":
+          description: Service cost data
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceCost"
+
+  /teams/{teamId}/cost:
+    get:
+      tags: [cost]
+      summary: Team-level cost rollup with budget vs actual
+      operationId: getTeamCost
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+        - $ref: "#/components/parameters/WindowParam"
+      responses:
+        "200":
+          description: Team cost rollup
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamCost"
+
+  /cost/summary:
+    get:
+      tags: [cost]
+      summary: Platform-wide cost summary
+      operationId: getCostSummary
+      responses:
+        "200":
+          description: Platform cost summary
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CostSummary"
+
+  # ── Security ──────────────────────────────────
+  /services/{serviceId}/security:
+    get:
+      tags: [security]
+      summary: Security posture — CVEs, SBOM, SAST results
+      operationId: getSecurityPosture
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      responses:
+        "200":
+          description: Security posture detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SecurityPosture"
+
+  /services/{serviceId}/security/sbom:
+    get:
+      tags: [security]
+      summary: Download SBOM in SPDX format
+      operationId: getServiceSbom
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      responses:
+        "200":
+          description: SBOM in SPDX JSON format
+          content:
+            application/json:
+              schema:
+                type: object
+
+  /security/webhooks/trivy:
+    post:
+      tags: [security]
+      summary: Trivy scan results webhook (called from GitHub Actions)
+      operationId: receiveTrivyResults
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/TrivyWebhookPayload"
+      responses:
+        "200":
+          description: Results ingested
+
+  # ── Fleet Operations ──────────────────────────
+  /fleet/collections:
+    get:
+      tags: [fleet]
+      summary: List service collections
+      operationId: listCollections
+      responses:
+        "200":
+          description: Collections list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Collection"
+
+    post:
+      tags: [fleet]
+      summary: Create a service collection
+      operationId: createCollection
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionInput"
+      responses:
+        "201":
+          description: Collection created
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collection"
+
+  /fleet/collections/{collectionId}:
+    get:
+      tags: [fleet]
+      summary: Get collection detail with member services
+      operationId: getCollection
+      parameters:
+        - $ref: "#/components/parameters/CollectionId"
+      responses:
+        "200":
+          description: Collection detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/CollectionDetail"
+
+    patch:
+      tags: [fleet]
+      summary: Update collection
+      operationId: updateCollection
+      parameters:
+        - $ref: "#/components/parameters/CollectionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/CollectionInput"
+      responses:
+        "200":
+          description: Collection updated
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/Collection"
+
+    delete:
+      tags: [fleet]
+      summary: Delete a collection
+      operationId: deleteCollection
+      parameters:
+        - $ref: "#/components/parameters/CollectionId"
+      responses:
+        "204":
+          description: Collection deleted
+
+  /fleet/collections/{collectionId}/operations:
+    post:
+      tags: [fleet]
+      summary: Submit bulk operation across collection (deploy, rollback, patch, rescan)
+      operationId: submitFleetOperation
+      parameters:
+        - $ref: "#/components/parameters/CollectionId"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/FleetOperationRequest"
+      responses:
+        "202":
+          description: Fleet operation started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FleetOperation"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /fleet/operations/{operationId}:
+    get:
+      tags: [fleet]
+      summary: Get fleet operation status and per-service progress
+      operationId: getFleetOperation
+      parameters:
+        - name: operationId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Fleet operation status
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/FleetOperation"
+
+  # ── Runbooks ──────────────────────────────────
+  /runbooks:
+    get:
+      tags: [runbooks]
+      summary: List runbook definitions
+      operationId: listRunbooks
+      parameters:
+        - $ref: "#/components/parameters/ServiceIdQuery"
+      responses:
+        "200":
+          description: Runbooks list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Runbook"
+
+  /runbooks/{runbookId}/execute:
+    post:
+      tags: [runbooks]
+      summary: Execute a runbook via Temporal RemediationWorkflow
+      operationId: executeRunbook
+      parameters:
+        - name: runbookId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/RunbookExecutionRequest"
+      responses:
+        "202":
+          description: Runbook execution started
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunbookExecution"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /runbooks/executions/{executionId}:
+    get:
+      tags: [runbooks]
+      summary: Get runbook execution status and audit trail
+      operationId: getRunbookExecution
+      parameters:
+        - name: executionId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Execution detail with audit trail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/RunbookExecution"
+
+  # ── AI Co-pilot ───────────────────────────────
+  /ai/chat:
+    post:
+      tags: [ai]
+      summary: Send message to AI ops co-pilot
+      operationId: aiChat
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AiChatRequest"
+      responses:
+        "200":
+          description: AI response with root cause, similar incidents, actions
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AiChatResponse"
+
+  /ai/incidents/{incidentId}/timeline:
+    get:
+      tags: [ai]
+      summary: Get stitched incident timeline from audit log
+      operationId: getIncidentTimeline
+      parameters:
+        - name: incidentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Incident timeline
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/IncidentTimeline"
+
+  # ── TechDocs ──────────────────────────────────
+  /docs/{serviceId}:
+    get:
+      tags: [docs]
+      summary: Serve TechDocs page for a service
+      operationId: getServiceDocs
+      parameters:
+        - $ref: "#/components/parameters/ServiceId"
+      responses:
+        "200":
+          description: TechDocs HTML content
+          content:
+            text/html:
+              schema:
+                type: string
+        "404":
+          $ref: "#/components/responses/NotFound"
+
+  /docs/search:
+    get:
+      tags: [docs]
+      summary: Semantic + full-text search across all TechDocs
+      operationId: searchDocs
+      parameters:
+        - name: q
+          in: query
+          required: true
+          schema:
+            type: string
+        - name: mode
+          in: query
+          schema:
+            type: string
+            enum: [semantic, fulltext, hybrid]
+            default: hybrid
+      responses:
+        "200":
+          description: Search results
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/DocsSearchResult"
+
+  /docs/webhooks/rebuild:
+    post:
+      tags: [docs]
+      summary: Trigger TechDocs rebuild (called from GitHub Actions)
+      operationId: triggerDocsRebuild
+      security: []
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/DocsRebuildPayload"
+      responses:
+        "202":
+          description: Rebuild queued
+
+  # ── Chaos Engineering ─────────────────────────
+  /chaos/experiments:
+    get:
+      tags: [chaos]
+      summary: List chaos experiments
+      operationId: listChaosExperiments
+      responses:
+        "200":
+          description: Experiments list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/ChaosExperiment"
+
+    post:
+      tags: [chaos]
+      summary: Create a chaos experiment (requires approval workflow)
+      operationId: createChaosExperiment
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ChaosExperimentRequest"
+      responses:
+        "202":
+          description: Experiment queued for approval
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChaosExperiment"
+        "403":
+          $ref: "#/components/responses/Forbidden"
+
+  /chaos/experiments/{experimentId}:
+    get:
+      tags: [chaos]
+      summary: Get experiment status and resilience score
+      operationId: getChaosExperiment
+      parameters:
+        - name: experimentId
+          in: path
+          required: true
+          schema:
+            type: string
+            format: uuid
+      responses:
+        "200":
+          description: Experiment detail
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ChaosExperiment"
+
+  # ── Teams & Quotas ────────────────────────────
+  /teams:
+    get:
+      tags: [teams]
+      summary: List all teams
+      operationId: listTeams
+      responses:
+        "200":
+          description: Teams list
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/Team"
+
+  /teams/{teamId}/quota:
+    get:
+      tags: [teams]
+      summary: Get team resource quota and current consumption
+      operationId: getTeamQuota
+      parameters:
+        - name: teamId
+          in: path
+          required: true
+          schema:
+            type: string
+      responses:
+        "200":
+          description: Team quota
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/TeamQuota"
+
+  # ── Audit Log ─────────────────────────────────
+  /audit:
+    get:
+      tags: [health]
+      summary: Query audit log
+      operationId: queryAuditLog
+      parameters:
+        - name: actor
+          in: query
+          schema:
+            type: string
+        - name: resource_type
+          in: query
+          schema:
+            type: string
+        - name: resource_id
+          in: query
+          schema:
+            type: string
+        - name: from
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - name: to
+          in: query
+          schema:
+            type: string
+            format: date-time
+        - $ref: "#/components/parameters/LimitParam"
+        - $ref: "#/components/parameters/PageParam"
+      responses:
+        "200":
+          description: Audit log entries
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/AuditLogResponse"
+
+  # ── Policies ──────────────────────────────────
+  /policies:
+    get:
+      tags: [deploy]
+      summary: List active OPA policies with weights (read-only portal view)
+      operationId: listPolicies
+      responses:
+        "200":
+          description: Active policies
+          content:
+            application/json:
+              schema:
+                type: array
+                items:
+                  $ref: "#/components/schemas/PolicyDefinition"
+
+  /policies/{policyId}/propose:
+    post:
+      tags: [deploy]
+      summary: Propose a policy change (opens a GitHub PR)
+      operationId: proposePolicyChange
+      parameters:
+        - name: policyId
+          in: path
+          required: true
+          schema:
+            type: string
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/PolicyChangeProposal"
+      responses:
+        "202":
+          description: PR opened
+          content:
+            application/json:
+              schema:
+                type: object
+                properties:
+                  pr_url:
+                    type: string
+                    format: uri
+
+# ─────────────────────────────────────────────
+# WEBSOCKET ENDPOINTS (documented for reference)
+# ─────────────────────────────────────────────
+# WS /ws/topology
+#   Stream: TopologyEvent (service health, traffic volume, edge changes)
+#   Auth: JWT in query param ?token=
+#
+# WS /ws/pipelines/{serviceId}
+#   Stream: PipelineStageEvent (stage name, status, log tail, duration)
+#   Auth: JWT in query param ?token=
+#
+# WS /ws/fleet/{operationId}
+#   Stream: FleetProgressEvent (per-service progress, status, errors)
+#   Auth: JWT in query param ?token=
+#
+# WS /ws/error-budget/{serviceId}
+#   Stream: BurnRateEvent (current rate, window, budget remaining)
+#   Auth: JWT in query param ?token=
+
+# ─────────────────────────────────────────────
+# GRAPHQL ENDPOINT (documented for reference)
+# ─────────────────────────────────────────────
+# POST /graphql
+#   Schema: Service { doraMetrics, errorBudget, securityPosture, maturityScore, collections }
+#   Auth: Bearer JWT in Authorization header
+#   Note: Read-only. All mutations go through REST endpoints.
+
+# ─────────────────────────────────────────────
+# COMPONENTS
+# ─────────────────────────────────────────────
+components:
+  securitySchemes:
+    BearerAuth:
+      type: http
+      scheme: bearer
+      bearerFormat: JWT
+
+  parameters:
+    ServiceId:
+      name: serviceId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    ServiceIdQuery:
+      name: service_id
+      in: query
+      schema:
+        type: string
+        format: uuid
+
+    CollectionId:
+      name: collectionId
+      in: path
+      required: true
+      schema:
+        type: string
+        format: uuid
+
+    TeamFilter:
+      name: team
+      in: query
+      schema:
+        type: string
+
+    LanguageFilter:
+      name: language
+      in: query
+      schema:
+        type: string
+        enum: [python, go, typescript, rust, java]
+
+    HealthFilter:
+      name: health
+      in: query
+      schema:
+        type: string
+        enum: [healthy, degraded, frozen, unknown]
+
+    SearchQuery:
+      name: q
+      in: query
+      schema:
+        type: string
+
+    PageParam:
+      name: page
+      in: query
+      schema:
+        type: integer
+        default: 1
+        minimum: 1
+
+    LimitParam:
+      name: limit
+      in: query
+      schema:
+        type: integer
+        default: 20
+        minimum: 1
+        maximum: 100
+
+    WindowParam:
+      name: window
+      in: query
+      description: Time window for metrics
+      schema:
+        type: string
+        enum: [7d, 14d, 30d, 90d]
+        default: 30d
+
+  responses:
+    Unauthorized:
+      description: Missing or invalid JWT
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    Forbidden:
+      description: Insufficient RBAC role for this action
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+    NotFound:
+      description: Resource not found
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+  schemas:
+
+    # ── Core service schemas ─────────────────────
+    Service:
+      type: object
+      required: [id, name, team, language, version, health_status, compliance_score,
+                 maturity_score, error_budget_consumed, deploy_frozen, replica_count,
+                 last_deploy_at, created_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+          example: payment-service
+        team:
+          type: string
+          example: commerce
+        language:
+          type: string
+          enum: [python, go, typescript, rust, java]
+        version:
+          type: string
+          example: v1.9.0
+        repo_url:
+          type: string
+          format: uri
+        health_status:
+          type: string
+          enum: [healthy, degraded, frozen, unknown]
+        compliance_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        maturity_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        error_budget_consumed:
+          type: number
+          format: float
+          minimum: 0
+          maximum: 100
+          description: Percentage of 30-day error budget consumed
+        deploy_frozen:
+          type: boolean
+        replica_count:
+          type: integer
+        last_deploy_at:
+          type: string
+          format: date-time
+        template_version:
+          type: string
+          description: Scaffold template version used — used to flag services behind current standard
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    ServiceDetail:
+      allOf:
+        - $ref: "#/components/schemas/Service"
+        - type: object
+          properties:
+            slo:
+              $ref: "#/components/schemas/SloDefinition"
+            error_budget:
+              $ref: "#/components/schemas/ErrorBudget"
+            security:
+              $ref: "#/components/schemas/SecurityPostureSummary"
+            maturity_breakdown:
+              $ref: "#/components/schemas/MaturityScore"
+            cost:
+              $ref: "#/components/schemas/ServiceCostSummary"
+            recent_deploys:
+              type: array
+              items:
+                $ref: "#/components/schemas/DeployHistoryEntry"
+            upstream_dependencies:
+              type: array
+              items:
+                type: string
+              description: Service IDs this service depends on
+            downstream_dependents:
+              type: array
+              items:
+                type: string
+              description: Service IDs that depend on this service
+
+    ServiceListResponse:
+      type: object
+      required: [items, total, page, limit]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/Service"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+        summary:
+          $ref: "#/components/schemas/CatalogSummary"
+
+    CatalogSummary:
+      type: object
+      properties:
+        total_services:
+          type: integer
+        healthy:
+          type: integer
+        degraded:
+          type: integer
+        frozen:
+          type: integer
+        avg_maturity_score:
+          type: number
+        critical_cves:
+          type: integer
+
+    ServiceRegistration:
+      type: object
+      required: [name, team, language, repo_url]
+      properties:
+        name:
+          type: string
+        team:
+          type: string
+        language:
+          type: string
+          enum: [python, go, typescript, rust, java]
+        repo_url:
+          type: string
+          format: uri
+        description:
+          type: string
+        upstream_dependencies:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    ServiceUpdate:
+      type: object
+      properties:
+        version:
+          type: string
+        replica_count:
+          type: integer
+        health_status:
+          type: string
+          enum: [healthy, degraded, frozen, unknown]
+        description:
+          type: string
+
+    # ── SLO ──────────────────────────────────────
+    SloDefinition:
+      type: object
+      required: [service_id, sli_type, target, window_days]
+      properties:
+        id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        sli_type:
+          type: string
+          enum: [availability, latency, throughput, error_rate]
+        target:
+          type: number
+          format: float
+          description: Target percentage (e.g. 99.9 for 99.9% availability)
+        window_days:
+          type: integer
+          default: 30
+        latency_threshold_ms:
+          type: integer
+          description: Required when sli_type is latency
+        description:
+          type: string
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    SloDefinitionInput:
+      type: object
+      required: [sli_type, target, window_days]
+      properties:
+        sli_type:
+          type: string
+          enum: [availability, latency, throughput, error_rate]
+        target:
+          type: number
+          format: float
+        window_days:
+          type: integer
+          default: 30
+        latency_threshold_ms:
+          type: integer
+        description:
+          type: string
+
+    # ── Changelog ────────────────────────────────
+    ChangelogEntry:
+      type: object
+      required: [version, released_at, summary]
+      properties:
+        version:
+          type: string
+        released_at:
+          type: string
+          format: date-time
+        summary:
+          type: string
+        breaking_changes:
+          type: array
+          items:
+            type: string
+        github_release_url:
+          type: string
+          format: uri
+
+    # ── Blast Radius ─────────────────────────────
+    BlastRadiusResponse:
+      type: object
+      required: [target_service_id, nodes, edges, risk_level, affected_count]
+      properties:
+        target_service_id:
+          type: string
+          format: uuid
+        nodes:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphNode"
+        edges:
+          type: array
+          items:
+            $ref: "#/components/schemas/GraphEdge"
+        risk_level:
+          type: string
+          enum: [low, medium, high, critical]
+        affected_count:
+          type: integer
+        cached:
+          type: boolean
+          description: True if result was served from Redis cache
+        computed_at:
+          type: string
+          format: date-time
+
+    GraphNode:
+      type: object
+      required: [id, name, team, health_status, hop_distance]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        team:
+          type: string
+        health_status:
+          type: string
+          enum: [healthy, degraded, frozen, unknown]
+        hop_distance:
+          type: integer
+          minimum: 0
+          maximum: 5
+        is_target:
+          type: boolean
+
+    GraphEdge:
+      type: object
+      required: [source_id, target_id, relationship]
+      properties:
+        source_id:
+          type: string
+          format: uuid
+        target_id:
+          type: string
+          format: uuid
+        relationship:
+          type: string
+          enum: [DEPENDS_ON, USES]
+
+    DependencyHealthResponse:
+      type: object
+      required: [service_id, risk_score, degraded_upstreams]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        risk_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Pre-deploy risk score — higher means more upstream risk
+        degraded_upstreams:
+          type: array
+          items:
+            type: object
+            properties:
+              service_id:
+                type: string
+                format: uuid
+              service_name:
+                type: string
+              health_status:
+                type: string
+              error_budget_consumed:
+                type: number
+        recommendation:
+          type: string
+          example: "2 upstream dependencies are currently degraded. Consider delaying this deploy."
+
+    # ── Deploy ───────────────────────────────────
+    DeployRequest:
+      type: object
+      required: [version, environment]
+      properties:
+        version:
+          type: string
+        environment:
+          type: string
+          enum: [dev, staging, production]
+        notes:
+          type: string
+        skip_blast_radius:
+          type: boolean
+          default: false
+          description: SRE override — requires sre role
+
+    DeployResponse:
+      type: object
+      required: [deploy_id, status, compliance_score]
+      properties:
+        deploy_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, blocked, frozen]
+        compliance_score:
+          type: integer
+        blast_radius_summary:
+          type: object
+          properties:
+            affected_count:
+              type: integer
+            risk_level:
+              type: string
+        estimated_duration_seconds:
+          type: integer
+
+    DeployStatus:
+      type: object
+      required: [deploy_id, status, created_at]
+      properties:
+        deploy_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, blocked, frozen]
+        stage:
+          type: string
+        progress_percent:
+          type: integer
+        logs_tail:
+          type: array
+          items:
+            type: string
+        created_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+
+    DeployHistoryEntry:
+      type: object
+      required: [deploy_id, version, environment, status, compliance_score, actor, deployed_at]
+      properties:
+        deploy_id:
+          type: string
+          format: uuid
+        version:
+          type: string
+        environment:
+          type: string
+        status:
+          type: string
+          enum: [succeeded, failed, blocked, rolled_back]
+        compliance_score:
+          type: integer
+        actor:
+          type: string
+        deployed_at:
+          type: string
+          format: date-time
+
+    ComplianceReport:
+      type: object
+      required: [service_id, version, score, passed, checks]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        version:
+          type: string
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        passed:
+          type: boolean
+          description: True if score >= 80
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComplianceCheck"
+        evaluated_at:
+          type: string
+          format: date-time
+
+    ComplianceCheck:
+      type: object
+      required: [name, status, score, weight]
+      properties:
+        name:
+          type: string
+          enum: [health_endpoints, slo_defined, runbook, otel_instrumentation, secrets_via_vault, security_posture]
+        status:
+          type: string
+          enum: [pass, warn, fail]
+        score:
+          type: integer
+        weight:
+          type: integer
+        detail:
+          type: string
+        fix_url:
+          type: string
+          format: uri
+
+    ComplianceFailureResponse:
+      type: object
+      required: [score, passed, checks, message]
+      properties:
+        score:
+          type: integer
+        passed:
+          type: boolean
+        message:
+          type: string
+        checks:
+          type: array
+          items:
+            $ref: "#/components/schemas/ComplianceCheck"
+
+    DeployFrozenResponse:
+      type: object
+      required: [frozen, reason, frozen_at, budget_consumed]
+      properties:
+        frozen:
+          type: boolean
+        reason:
+          type: string
+        frozen_at:
+          type: string
+          format: date-time
+        budget_consumed:
+          type: number
+        unfreeze_requires_role:
+          type: string
+          default: sre
+
+    # ── Scaffold ─────────────────────────────────
+    ScaffoldRequest:
+      type: object
+      required: [name, team, language, description]
+      properties:
+        name:
+          type: string
+          pattern: "^[a-z][a-z0-9-]{2,62}$"
+        team:
+          type: string
+        language:
+          type: string
+          enum: [python, go, typescript, rust, java]
+        description:
+          type: string
+        template_version:
+          type: string
+          description: Pin to specific template version. Defaults to latest.
+        upstream_dependencies:
+          type: array
+          items:
+            type: string
+            format: uuid
+
+    ScaffoldResponse:
+      type: object
+      required: [workflow_id, status]
+      properties:
+        workflow_id:
+          type: string
+        status:
+          type: string
+          enum: [started, running, completed, failed]
+        estimated_duration_seconds:
+          type: integer
+          default: 240
+
+    ScaffoldStatus:
+      type: object
+      required: [workflow_id, status, steps]
+      properties:
+        workflow_id:
+          type: string
+        status:
+          type: string
+          enum: [started, running, completed, failed]
+        steps:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              status:
+                type: string
+                enum: [pending, running, completed, failed, skipped]
+              completed_at:
+                type: string
+                format: date-time
+        repo_url:
+          type: string
+          format: uri
+          description: Available when status is completed
+        service_id:
+          type: string
+          format: uuid
+          description: Catalog ID of scaffolded service
+
+    ScaffoldTemplate:
+      type: object
+      required: [id, version, language, description, is_latest]
+      properties:
+        id:
+          type: string
+        version:
+          type: string
+        language:
+          type: string
+        description:
+          type: string
+        is_latest:
+          type: boolean
+        changelog:
+          type: string
+        released_at:
+          type: string
+          format: date-time
+
+    # ── IaC ──────────────────────────────────────
+    IacRequestInput:
+      type: object
+      required: [service_id, provider, resource_type, parameters]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+          enum: [terraform, pulumi]
+        resource_type:
+          type: string
+          example: aws_rds_instance
+        parameters:
+          type: object
+          additionalProperties: true
+        description:
+          type: string
+
+    IacRequest:
+      type: object
+      required: [id, service_id, provider, status, submitted_by, submitted_at]
+      properties:
+        id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        provider:
+          type: string
+          enum: [terraform, pulumi]
+        resource_type:
+          type: string
+        status:
+          type: string
+          enum: [pending, approved, applying, applied, failed, rejected]
+        plan_output:
+          type: string
+          description: Terraform/Pulumi plan diff
+        cost_delta_usd:
+          type: number
+          description: Estimated monthly cost change
+        submitted_by:
+          type: string
+        submitted_at:
+          type: string
+          format: date-time
+        approved_by:
+          type: string
+        workflow_id:
+          type: string
+          description: Temporal workflow ID for the apply job
+
+    QuotaExceededResponse:
+      type: object
+      required: [quota_type, current, limit, requested]
+      properties:
+        quota_type:
+          type: string
+          enum: [cpu, memory, storage, cost]
+        current:
+          type: number
+        limit:
+          type: number
+        requested:
+          type: number
+        approval_workflow_id:
+          type: string
+          description: Temporal workflow ID for quota approval
+
+    # ── Pipelines ────────────────────────────────
+    PipelineRun:
+      type: object
+      required: [id, service_id, run_number, status, triggered_by, started_at]
+      properties:
+        id:
+          type: string
+        service_id:
+          type: string
+          format: uuid
+        run_number:
+          type: integer
+        status:
+          type: string
+          enum: [queued, running, succeeded, failed, cancelled]
+        triggered_by:
+          type: string
+        branch:
+          type: string
+        commit_sha:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        duration_seconds:
+          type: integer
+
+    PipelineRunDetail:
+      allOf:
+        - $ref: "#/components/schemas/PipelineRun"
+        - type: object
+          properties:
+            stages:
+              type: array
+              items:
+                $ref: "#/components/schemas/PipelineStage"
+
+    PipelineStage:
+      type: object
+      required: [name, status]
+      properties:
+        name:
+          type: string
+        status:
+          type: string
+          enum: [pending, running, succeeded, failed, skipped]
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+        duration_seconds:
+          type: integer
+        log_url:
+          type: string
+          format: uri
+
+    # ── DORA ─────────────────────────────────────
+    DoraMetrics:
+      type: object
+      required: [deployment_frequency, lead_time_hours, mttr_hours, change_failure_rate]
+      properties:
+        team:
+          type: string
+        service_id:
+          type: string
+          format: uuid
+        window:
+          type: string
+        deployment_frequency:
+          type: object
+          required: [value, tier, unit]
+          properties:
+            value:
+              type: number
+            unit:
+              type: string
+              enum: [per_day, per_week, per_month]
+            tier:
+              type: string
+              enum: [elite, high, medium, low]
+            trend:
+              type: string
+              enum: [up, down, flat]
+        lead_time_hours:
+          type: object
+          required: [value, tier]
+          properties:
+            value:
+              type: number
+            tier:
+              type: string
+              enum: [elite, high, medium, low]
+            trend:
+              type: string
+              enum: [up, down, flat]
+        mttr_hours:
+          type: object
+          required: [value, tier]
+          properties:
+            value:
+              type: number
+            tier:
+              type: string
+              enum: [elite, high, medium, low]
+            trend:
+              type: string
+              enum: [up, down, flat]
+        change_failure_rate:
+          type: object
+          required: [value, tier]
+          properties:
+            value:
+              type: number
+              description: Percentage 0-100
+            tier:
+              type: string
+              enum: [elite, high, medium, low]
+            trend:
+              type: string
+              enum: [up, down, flat]
+        daily_deploy_counts:
+          type: array
+          description: Last N days deploy counts for bar chart
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              count:
+                type: integer
+
+    # ── Error Budget ──────────────────────────────
+    ErrorBudget:
+      type: object
+      required: [service_id, slo_target, budget_consumed, budget_remaining, burn_alerts, frozen]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        slo_target:
+          type: number
+        budget_consumed:
+          type: number
+          description: Percentage 0-100
+        budget_remaining:
+          type: number
+          description: Percentage 0-100
+        frozen:
+          type: boolean
+        frozen_at:
+          type: string
+          format: date-time
+        burn_alerts:
+          type: array
+          items:
+            $ref: "#/components/schemas/BurnAlert"
+        computed_at:
+          type: string
+          format: date-time
+
+    BurnAlert:
+      type: object
+      required: [burn_rate, window, severity, firing]
+      properties:
+        burn_rate:
+          type: number
+          description: Current burn rate multiplier (1x = on track to exhaust in window)
+        window:
+          type: string
+          enum: [1h, 6h, 1d, 3d]
+        severity:
+          type: string
+          enum: [page, ticket, warning]
+        firing:
+          type: boolean
+        time_to_exhaustion_hours:
+          type: number
+
+    FreezeRequest:
+      type: object
+      required: [service_id, reason, burn_rate]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        reason:
+          type: string
+        burn_rate:
+          type: number
+        idempotency_key:
+          type: string
+          description: Used to prevent duplicate freeze events from simultaneous Alertmanager firings
+
+    FreezeResponse:
+      type: object
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        frozen:
+          type: boolean
+        already_frozen:
+          type: boolean
+          description: True if service was already frozen (idempotent)
+        frozen_at:
+          type: string
+          format: date-time
+
+    # ── Maturity ──────────────────────────────────
+    MaturityScore:
+      type: object
+      required: [service_id, overall_score, pillars, computed_at]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        overall_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        pillars:
+          type: object
+          properties:
+            observability:
+              $ref: "#/components/schemas/MaturityPillar"
+            reliability:
+              $ref: "#/components/schemas/MaturityPillar"
+            security:
+              $ref: "#/components/schemas/MaturityPillar"
+            docs:
+              $ref: "#/components/schemas/MaturityPillar"
+            cost:
+              $ref: "#/components/schemas/MaturityPillar"
+            error_budget_health:
+              $ref: "#/components/schemas/MaturityPillar"
+        template_version:
+          type: string
+        template_behind_by:
+          type: integer
+          description: Number of major versions behind current scaffold template standard
+        computed_at:
+          type: string
+          format: date-time
+
+    MaturityPillar:
+      type: object
+      required: [score, weight, signals]
+      properties:
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        weight:
+          type: number
+        signals:
+          type: array
+          items:
+            type: object
+            properties:
+              name:
+                type: string
+              passed:
+                type: boolean
+              detail:
+                type: string
+
+    TeamMaturity:
+      type: object
+      required: [team_id, avg_score, services]
+      properties:
+        team_id:
+          type: string
+        avg_score:
+          type: number
+        rank:
+          type: integer
+        services:
+          type: array
+          items:
+            type: object
+            properties:
+              service_id:
+                type: string
+                format: uuid
+              service_name:
+                type: string
+              score:
+                type: integer
+
+    # ── Cost ─────────────────────────────────────
+    ServiceCost:
+      type: object
+      required: [service_id, current_month_usd, daily_average_usd, anomaly_detected]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        current_month_usd:
+          type: number
+        daily_average_usd:
+          type: number
+        seven_day_average_usd:
+          type: number
+        anomaly_detected:
+          type: boolean
+        anomaly_spike_percent:
+          type: number
+          description: How much above 7-day average (in %)
+        trend:
+          type: array
+          items:
+            type: object
+            properties:
+              date:
+                type: string
+                format: date
+              amount_usd:
+                type: number
+        window:
+          type: string
+
+    ServiceCostSummary:
+      type: object
+      properties:
+        current_month_usd:
+          type: number
+        anomaly_detected:
+          type: boolean
+
+    TeamCost:
+      type: object
+      required: [team_id, budget_usd, actual_usd, forecast_eom_usd]
+      properties:
+        team_id:
+          type: string
+        budget_usd:
+          type: number
+        actual_usd:
+          type: number
+        forecast_eom_usd:
+          type: number
+          description: Forecast to end of month
+        variance_percent:
+          type: number
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServiceCostSummary"
+
+    CostSummary:
+      type: object
+      required: [total_month_usd, total_services, anomalies_count]
+      properties:
+        total_month_usd:
+          type: number
+        total_services:
+          type: integer
+        anomalies_count:
+          type: integer
+        top_spenders:
+          type: array
+          items:
+            type: object
+            properties:
+              service_id:
+                type: string
+                format: uuid
+              service_name:
+                type: string
+              amount_usd:
+                type: number
+
+    # ── Security ─────────────────────────────────
+    SecurityPosture:
+      type: object
+      required: [service_id, score, critical_cves, high_cves, sbom_present, sast_passed]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        score:
+          type: integer
+          minimum: 0
+          maximum: 100
+        critical_cves:
+          type: integer
+        high_cves:
+          type: integer
+        medium_cves:
+          type: integer
+        sbom_present:
+          type: boolean
+        sbom_generated_at:
+          type: string
+          format: date-time
+        sast_passed:
+          type: boolean
+        network_policy_present:
+          type: boolean
+        last_scan_at:
+          type: string
+          format: date-time
+        cves:
+          type: array
+          items:
+            $ref: "#/components/schemas/CveEntry"
+
+    SecurityPostureSummary:
+      type: object
+      properties:
+        score:
+          type: integer
+        critical_cves:
+          type: integer
+        last_scan_at:
+          type: string
+          format: date-time
+
+    CveEntry:
+      type: object
+      required: [id, severity, package, installed_version, fixed_version]
+      properties:
+        id:
+          type: string
+          example: CVE-2024-1234
+        severity:
+          type: string
+          enum: [critical, high, medium, low]
+        package:
+          type: string
+        installed_version:
+          type: string
+        fixed_version:
+          type: string
+        description:
+          type: string
+
+    TrivyWebhookPayload:
+      type: object
+      required: [service_name, image_tag, results]
+      properties:
+        service_name:
+          type: string
+        image_tag:
+          type: string
+        results:
+          type: array
+          items:
+            type: object
+            additionalProperties: true
+        idempotency_key:
+          type: string
+
+    # ── Fleet ────────────────────────────────────
+    Collection:
+      type: object
+      required: [id, name, service_count, health_percent]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        description:
+          type: string
+        filter_type:
+          type: string
+          enum: [team, language, tag, manual, score_below]
+        filter_value:
+          type: string
+        service_count:
+          type: integer
+        health_percent:
+          type: number
+
+    CollectionInput:
+      type: object
+      required: [name]
+      properties:
+        name:
+          type: string
+        description:
+          type: string
+        filter_type:
+          type: string
+          enum: [team, language, tag, manual, score_below]
+        filter_value:
+          type: string
+        service_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Used when filter_type is manual
+
+    CollectionDetail:
+      allOf:
+        - $ref: "#/components/schemas/Collection"
+        - type: object
+          properties:
+            services:
+              type: array
+              items:
+                $ref: "#/components/schemas/Service"
+
+    FleetOperationRequest:
+      type: object
+      required: [operation_type, service_ids]
+      properties:
+        operation_type:
+          type: string
+          enum: [deploy, rollback, patch, compliance_rescan]
+        service_ids:
+          type: array
+          items:
+            type: string
+            format: uuid
+          description: Subset of collection services to operate on
+        version:
+          type: string
+          description: Required for deploy operations
+        notes:
+          type: string
+        approved_blast_radius:
+          type: boolean
+          default: false
+
+    FleetOperation:
+      type: object
+      required: [id, collection_id, operation_type, status, total, completed, failed]
+      properties:
+        id:
+          type: string
+          format: uuid
+        collection_id:
+          type: string
+          format: uuid
+        operation_type:
+          type: string
+        status:
+          type: string
+          enum: [pending_approval, running, completed, failed, cancelled]
+        total:
+          type: integer
+        completed:
+          type: integer
+        failed:
+          type: integer
+        per_service:
+          type: array
+          items:
+            type: object
+            properties:
+              service_id:
+                type: string
+                format: uuid
+              service_name:
+                type: string
+              status:
+                type: string
+                enum: [pending, running, succeeded, failed, skipped]
+              error:
+                type: string
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+
+    # ── Runbooks ──────────────────────────────────
+    Runbook:
+      type: object
+      required: [id, name, service_id, version, actions, required_role]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        service_id:
+          type: string
+          format: uuid
+        description:
+          type: string
+        version:
+          type: integer
+          description: Increments on every update — snapshot stored in audit log
+        actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RunbookAction"
+        required_role:
+          type: string
+          enum: [developer, sre, platform_engineer]
+        requires_approval:
+          type: boolean
+        created_at:
+          type: string
+          format: date-time
+        updated_at:
+          type: string
+          format: date-time
+
+    RunbookAction:
+      type: object
+      required: [type, parameters]
+      properties:
+        type:
+          type: string
+          enum: [k8s_restart_pod, k8s_scale_deployment, vault_rotate_secret, aws_api_call, flush_cache]
+        parameters:
+          type: object
+          additionalProperties: true
+        description:
+          type: string
+
+    RunbookExecutionRequest:
+      type: object
+      required: [service_id]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        parameters:
+          type: object
+          additionalProperties: true
+        notes:
+          type: string
+
+    RunbookExecution:
+      type: object
+      required: [id, runbook_id, runbook_version, service_id, status, actor]
+      properties:
+        id:
+          type: string
+          format: uuid
+        runbook_id:
+          type: string
+          format: uuid
+        runbook_version:
+          type: integer
+          description: Snapshot of version at execution time
+        runbook_snapshot:
+          $ref: "#/components/schemas/Runbook"
+          description: Full runbook state at time of execution — immutable audit record
+        service_id:
+          type: string
+          format: uuid
+        status:
+          type: string
+          enum: [pending_approval, running, completed, failed]
+        actor:
+          type: string
+        approved_by:
+          type: string
+        audit_trail:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEntry"
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+
+    # ── AI Co-pilot ───────────────────────────────
+    AiChatRequest:
+      type: object
+      required: [message]
+      properties:
+        message:
+          type: string
+        incident_context:
+          $ref: "#/components/schemas/IncidentContext"
+        conversation_history:
+          type: array
+          items:
+            type: object
+            properties:
+              role:
+                type: string
+                enum: [user, assistant]
+              content:
+                type: string
+        max_similar_incidents:
+          type: integer
+          default: 3
+          maximum: 5
+          description: Top-k for pgvector similarity search
+
+    IncidentContext:
+      type: object
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        service_name:
+          type: string
+        error_rate:
+          type: number
+        recent_deploys:
+          type: array
+          items:
+            $ref: "#/components/schemas/DeployHistoryEntry"
+        active_alerts:
+          type: array
+          items:
+            type: string
+        burn_rate:
+          type: number
+        budget_consumed:
+          type: number
+
+    AiChatResponse:
+      type: object
+      required: [message, similar_incidents]
+      properties:
+        message:
+          type: string
+        root_cause_analysis:
+          type: object
+          properties:
+            summary:
+              type: string
+            confidence:
+              type: number
+              minimum: 0
+              maximum: 1
+            contributing_factors:
+              type: array
+              items:
+                type: string
+        similar_incidents:
+          type: array
+          items:
+            $ref: "#/components/schemas/SimilarIncident"
+        recommended_actions:
+          type: array
+          items:
+            $ref: "#/components/schemas/RecommendedAction"
+        tokens_used:
+          type: integer
+
+    SimilarIncident:
+      type: object
+      required: [incident_id, similarity_score, summary, resolved_at]
+      properties:
+        incident_id:
+          type: string
+          format: uuid
+        similarity_score:
+          type: number
+          minimum: 0
+          maximum: 1
+        summary:
+          type: string
+        root_cause:
+          type: string
+        resolution:
+          type: string
+        resolved_at:
+          type: string
+          format: date-time
+        mttr_minutes:
+          type: integer
+
+    RecommendedAction:
+      type: object
+      required: [label, action_type]
+      properties:
+        label:
+          type: string
+          example: "Rollback to v1.8.3"
+        action_type:
+          type: string
+          enum: [rollback, scale, restart_pod, execute_runbook, open_url]
+        parameters:
+          type: object
+          additionalProperties: true
+        estimated_mttr_minutes:
+          type: integer
+
+    IncidentTimeline:
+      type: object
+      required: [incident_id, events]
+      properties:
+        incident_id:
+          type: string
+          format: uuid
+        events:
+          type: array
+          items:
+            type: object
+            required: [timestamp, event_type, description]
+            properties:
+              timestamp:
+                type: string
+                format: date-time
+              event_type:
+                type: string
+                enum: [deploy, alert_fired, alert_resolved, runbook_executed, budget_frozen, budget_unfrozen, scale_event]
+              description:
+                type: string
+              actor:
+                type: string
+              metadata:
+                type: object
+                additionalProperties: true
+
+    # ── Docs ─────────────────────────────────────
+    DocsSearchResult:
+      type: object
+      required: [service_id, service_name, title, excerpt, score]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        service_name:
+          type: string
+        title:
+          type: string
+        excerpt:
+          type: string
+        score:
+          type: number
+        url:
+          type: string
+          format: uri
+        freshness_days:
+          type: integer
+          description: Days since docs were last updated
+
+    DocsRebuildPayload:
+      type: object
+      required: [service_name, repo_url, commit_sha]
+      properties:
+        service_name:
+          type: string
+        repo_url:
+          type: string
+          format: uri
+        commit_sha:
+          type: string
+        triggered_by:
+          type: string
+
+    # ── Chaos ────────────────────────────────────
+    ChaosExperimentRequest:
+      type: object
+      required: [service_id, experiment_type, duration_seconds]
+      properties:
+        service_id:
+          type: string
+          format: uuid
+        experiment_type:
+          type: string
+          enum: [pod_kill, network_latency, cpu_stress, memory_pressure]
+        duration_seconds:
+          type: integer
+          minimum: 30
+          maximum: 3600
+        parameters:
+          type: object
+          additionalProperties: true
+          example:
+            latency_ms: 200
+            jitter_ms: 50
+        environment:
+          type: string
+          enum: [dev, staging, production]
+
+    ChaosExperiment:
+      type: object
+      required: [id, service_id, experiment_type, status]
+      properties:
+        id:
+          type: string
+          format: uuid
+        service_id:
+          type: string
+          format: uuid
+        experiment_type:
+          type: string
+        status:
+          type: string
+          enum: [pending_approval, approved, running, completed, failed, aborted]
+        resilience_score:
+          type: integer
+          minimum: 0
+          maximum: 100
+          description: Computed during experiment based on service health metrics
+        approved_by:
+          type: string
+        started_at:
+          type: string
+          format: date-time
+        completed_at:
+          type: string
+          format: date-time
+
+    # ── Teams & Quotas ────────────────────────────
+    Team:
+      type: object
+      required: [id, name, slug]
+      properties:
+        id:
+          type: string
+          format: uuid
+        name:
+          type: string
+        slug:
+          type: string
+        service_count:
+          type: integer
+        avg_maturity_score:
+          type: number
+
+    TeamQuota:
+      type: object
+      required: [team_id, quotas]
+      properties:
+        team_id:
+          type: string
+        quotas:
+          type: object
+          properties:
+            cpu_cores:
+              $ref: "#/components/schemas/QuotaResource"
+            memory_gb:
+              $ref: "#/components/schemas/QuotaResource"
+            storage_gb:
+              $ref: "#/components/schemas/QuotaResource"
+            monthly_cost_usd:
+              $ref: "#/components/schemas/QuotaResource"
+
+    QuotaResource:
+      type: object
+      required: [limit, used, available]
+      properties:
+        limit:
+          type: number
+        used:
+          type: number
+        available:
+          type: number
+        unit:
+          type: string
+
+    # ── Policies ──────────────────────────────────
+    PolicyDefinition:
+      type: object
+      required: [id, name, description, weight, active]
+      properties:
+        id:
+          type: string
+        name:
+          type: string
+          enum: [health_endpoints, slo_defined, runbook, otel_instrumentation, secrets_via_vault, security_posture]
+        description:
+          type: string
+        weight:
+          type: integer
+          description: Contribution to 0-100 compliance score
+        active:
+          type: boolean
+        rego_file:
+          type: string
+          description: Path to Rego policy file in Git
+        last_updated_at:
+          type: string
+          format: date-time
+        last_updated_by:
+          type: string
+
+    PolicyChangeProposal:
+      type: object
+      required: [change_description, proposed_weight]
+      properties:
+        change_description:
+          type: string
+        proposed_weight:
+          type: integer
+        proposed_rego:
+          type: string
+          description: New Rego policy content
+
+    # ── Audit ─────────────────────────────────────
+    AuditEntry:
+      type: object
+      required: [id, actor, action, resource_type, resource_id, outcome, timestamp]
+      properties:
+        id:
+          type: string
+          format: uuid
+        actor:
+          type: string
+        action:
+          type: string
+        resource_type:
+          type: string
+        resource_id:
+          type: string
+        payload:
+          type: object
+          additionalProperties: true
+        outcome:
+          type: string
+          enum: [success, failure, blocked]
+        ip_address:
+          type: string
+        timestamp:
+          type: string
+          format: date-time
+
+    AuditLogResponse:
+      type: object
+      required: [items, total]
+      properties:
+        items:
+          type: array
+          items:
+            $ref: "#/components/schemas/AuditEntry"
+        total:
+          type: integer
+        page:
+          type: integer
+        limit:
+          type: integer
+
+    # ── Auth ──────────────────────────────────────
+    TokenRequest:
+      type: object
+      required: [username, password]
+      properties:
+        username:
+          type: string
+        password:
+          type: string
+          format: password
+
+    TokenResponse:
+      type: object
+      required: [access_token, token_type, expires_in]
+      properties:
+        access_token:
+          type: string
+        token_type:
+          type: string
+          default: bearer
+        expires_in:
+          type: integer
+        refresh_token:
+          type: string
+        role:
+          type: string
+          enum: [developer, sre, platform_engineer, engineering_manager]
+
+    # ── Platform Health ───────────────────────────
+    HealthResponse:
+      type: object
+      required: [status, version]
+      properties:
+        status:
+          type: string
+          enum: [ok]
+        version:
+          type: string
+        uptime_seconds:
+          type: integer
+
+    ReadinessResponse:
+      type: object
+      required: [ready, checks]
+      properties:
+        ready:
+          type: boolean
+        checks:
+          type: object
+          properties:
+            postgres:
+              $ref: "#/components/schemas/DependencyCheck"
+            redis:
+              $ref: "#/components/schemas/DependencyCheck"
+            neo4j:
+              $ref: "#/components/schemas/DependencyCheck"
+            temporal:
+              $ref: "#/components/schemas/DependencyCheck"
+            vault:
+              $ref: "#/components/schemas/DependencyCheck"
+
+    DependencyCheck:
+      type: object
+      required: [healthy, latency_ms]
+      properties:
+        healthy:
+          type: boolean
+        latency_ms:
+          type: integer
+        error:
+          type: string
+
+    # ── Common ────────────────────────────────────
+    ErrorResponse:
+      type: object
+      required: [error, message]
+      properties:
+        error:
+          type: string
+        message:
+          type: string
+        details:
+          type: object
+          additionalProperties: true
+        request_id:
+          type: string
+          format: uuid
+
+security:
+  - BearerAuth: []
