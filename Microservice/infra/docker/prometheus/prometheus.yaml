@@ -1,0 +1,58 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  external_labels:
+    env: development
+    platform: nerve-idp
+
+# Alertmanager integration
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: ["alertmanager:9093"]
+      timeout: 10s
+
+# Recording and alerting rules
+rule_files:
+  - /etc/prometheus/rules/*.yaml
+
+scrape_configs:
+  # OTel Collector — all service metrics flow through here
+  - job_name: nerve-services
+    static_configs:
+      - targets: ["otel-collector:8889"]
+    metric_relabel_configs:
+      - source_labels: [__name__]
+        regex: "nerve_.*"
+        action: keep
+
+  # Prometheus itself
+  - job_name: prometheus
+    static_configs:
+      - targets: ["localhost:9090"]
+
+  # FastAPI Gateway
+  - job_name: nerve-gateway
+    static_configs:
+      - targets: ["host.docker.internal:8000"]
+    metrics_path: /metrics
+
+  # PgBouncer
+  - job_name: pgbouncer
+    static_configs:
+      - targets: ["pgbouncer:9127"]
+
+  # Redis
+  - job_name: redis
+    static_configs:
+      - targets: ["redis:9121"]
+
+  # Neo4j
+  - job_name: neo4j
+    static_configs:
+      - targets: ["neo4j:2004"]
+
+  # Temporal
+  - job_name: temporal
+    static_configs:
+      - targets: ["temporal:9090"]
