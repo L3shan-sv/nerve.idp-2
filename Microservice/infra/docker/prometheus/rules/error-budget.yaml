@@ -1,0 +1,218 @@
+# Nerve IDP — Error Budget Burn Rate Rules
+# Implements the Google SRE multi-window burn rate model.
+#
+# Alert routing:
+#   14x burn rate + 1h AND 6h windows firing → PagerDuty page + deploy freeze
+#   6x  burn rate + 6h window               → PagerDuty page
+#   3x  burn rate + 1d window               → Jira ticket (auto-created)
+#   1x  burn rate + 3d window               → Dashboard warning
+#
+# The deploy freeze webhook is called by Alertmanager when the
+# NerveBudgetExhausted or NerveBurnRateCritical alert fires.
+
+groups:
+  # ─────────────────────────────────────────
+  # Recording rules — pre-compute burn rates
+  # These are evaluated every 15s and stored.
+  # Alerting rules reference these, not raw metrics.
+  # ─────────────────────────────────────────
+  - name: nerve_error_budget_recording
+    interval: 15s
+    rules:
+      # 1-hour error rate
+      - record: nerve:service_error_rate:1h
+        expr: |
+          rate(nerve_http_requests_total{status=~"5.."}[1h])
+          /
+          rate(nerve_http_requests_total[1h])
+
+      # 6-hour error rate
+      - record: nerve:service_error_rate:6h
+        expr: |
+          rate(nerve_http_requests_total{status=~"5.."}[6h])
+          /
+          rate(nerve_http_requests_total[6h])
+
+      # 1-day error rate
+      - record: nerve:service_error_rate:1d
+        expr: |
+          rate(nerve_http_requests_total{status=~"5.."}[1d])
+          /
+          rate(nerve_http_requests_total[1d])
+
+      # 3-day error rate
+      - record: nerve:service_error_rate:3d
+        expr: |
+          rate(nerve_http_requests_total{status=~"5.."}[3d])
+          /
+          rate(nerve_http_requests_total[3d])
+
+      # Burn rate = current error rate / (1 - SLO target)
+      # For a 99.9% SLO: error budget = 0.1% = 0.001
+      # Burn rate of 1x means consuming budget at exactly the SLO-defined rate
+      # Burn rate of 14x means budget exhausted in ~2 days instead of 30
+      - record: nerve:burn_rate:1h
+        expr: |
+          nerve:service_error_rate:1h
+          /
+          (1 - nerve_slo_target)
+
+      - record: nerve:burn_rate:6h
+        expr: |
+          nerve:service_error_rate:6h
+          /
+          (1 - nerve_slo_target)
+
+      - record: nerve:burn_rate:1d
+        expr: |
+          nerve:service_error_rate:1d
+          /
+          (1 - nerve_slo_target)
+
+      - record: nerve:burn_rate:3d
+        expr: |
+          nerve:service_error_rate:3d
+          /
+          (1 - nerve_slo_target)
+
+  # ─────────────────────────────────────────
+  # Alert rules — multi-window burn rate
+  # ─────────────────────────────────────────
+  - name: nerve_error_budget_alerts
+    rules:
+      # CRITICAL: 14x burn rate across both short windows
+      # Deploys FROZEN by Alertmanager → Nerve freeze webhook
+      # Estimated budget exhaustion: ~2 days
+      - alert: NerveBurnRateCritical
+        expr: |
+          nerve:burn_rate:1h > 14
+          AND
+          nerve:burn_rate:6h > 14
+        for: 2m
+        labels:
+          severity: page
+          team: "{{ $labels.team }}"
+          action: freeze_deploys
+        annotations:
+          summary: "Critical burn rate: {{ $labels.service }} exhausting error budget"
+          description: |
+            Service {{ $labels.service }} burn rate is {{ $value | humanize }}x.
+            Both 1h and 6h windows are firing.
+            At this rate, error budget exhausted in approximately 2 days.
+            Deploy freeze will be applied automatically.
+          runbook_url: "https://nerve.internal/docs/{{ $labels.service }}"
+
+      # HIGH: 6x burn rate on 6h window
+      # Estimated budget exhaustion: ~5 days
+      - alert: NerveBurnRateHigh
+        expr: |
+          nerve:burn_rate:6h > 6
+        for: 5m
+        labels:
+          severity: page
+          team: "{{ $labels.team }}"
+          action: alert_only
+        annotations:
+          summary: "High burn rate: {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} 6h burn rate is {{ $value | humanize }}x.
+            Error budget exhausted in approximately 5 days at current rate.
+
+      # MEDIUM: 3x burn rate on 1d window
+      # Action: auto-create Jira ticket
+      - alert: NerveBurnRateMedium
+        expr: |
+          nerve:burn_rate:1d > 3
+        for: 15m
+        labels:
+          severity: ticket
+          team: "{{ $labels.team }}"
+          action: create_ticket
+        annotations:
+          summary: "Elevated burn rate: {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} 1d burn rate is {{ $value | humanize }}x.
+            Error budget will be exhausted in approximately 10 days.
+
+      # LOW: 1x burn rate on 3d window — burning faster than replenishment
+      # Action: dashboard warning only
+      - alert: NerveBurnRateLow
+        expr: |
+          nerve:burn_rate:3d > 1
+        for: 30m
+        labels:
+          severity: warning
+          team: "{{ $labels.team }}"
+          action: dashboard_only
+        annotations:
+          summary: "Budget warning: {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} is consuming error budget faster than it replenishes.
+            3d burn rate: {{ $value | humanize }}x.
+
+      # EXHAUSTED: budget at zero — freeze already applied
+      - alert: NerveBudgetExhausted
+        expr: |
+          nerve_error_budget_remaining < 0.001
+        for: 0m
+        labels:
+          severity: page
+          team: "{{ $labels.team }}"
+          action: freeze_deploys
+        annotations:
+          summary: "Error budget EXHAUSTED: {{ $labels.service }}"
+          description: |
+            Service {{ $labels.service }} has exhausted its 30-day error budget.
+            All non-emergency deploys are frozen.
+            SRE override required to unfreeze.
+
+  # ─────────────────────────────────────────
+  # Platform health alerts
+  # ─────────────────────────────────────────
+  - name: nerve_platform_health
+    rules:
+      - alert: NerveGatewayDown
+        expr: up{job="nerve-gateway"} == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Nerve IDP gateway is down"
+
+      - alert: NervePostgresDown
+        expr: up{job="pgbouncer"} == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "PgBouncer (PostgreSQL proxy) is down"
+
+      - alert: NerveRedisDown
+        expr: up{job="redis"} == 0
+        for: 1m
+        labels:
+          severity: page
+        annotations:
+          summary: "Redis is down — caching, events, and Celery affected"
+
+      - alert: NerveNeo4jDown
+        expr: up{job="neo4j"} == 0
+        for: 2m
+        labels:
+          severity: page
+        annotations:
+          summary: "Neo4j is down — blast radius queries unavailable"
+
+      # High PgBouncer pool saturation — approaching connection wall
+      - alert: NervePgBouncerPoolSaturation
+        expr: |
+          pgbouncer_pools_server_active_connections
+          /
+          pgbouncer_config_max_client_conn
+          > 0.8
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "PgBouncer pool at {{ $value | humanizePercentage }} capacity"
+          description: "Consider increasing PGBOUNCER_MAX_CLIENT_CONN or DEFAULT_POOL_SIZE"
