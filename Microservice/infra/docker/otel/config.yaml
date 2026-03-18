@@ -1,0 +1,89 @@
+# Nerve IDP — OpenTelemetry Collector configuration
+# Receives: traces and metrics from all backend services
+# Exports: traces → Jaeger, metrics → Prometheus endpoint
+
+receivers:
+  otlp:
+    protocols:
+      grpc:
+        endpoint: 0.0.0.0:4317
+      http:
+        endpoint: 0.0.0.0:4318
+        cors:
+          allowed_origins:
+            - "http://localhost:5173"
+            - "http://localhost:3000"
+
+processors:
+  batch:
+    timeout: 1s
+    send_batch_size: 1024
+
+  memory_limiter:
+    check_interval: 1s
+    limit_mib: 512
+    spike_limit_mib: 128
+
+  # Add service.name and nerve.env resource attributes
+  resource:
+    attributes:
+      - key: nerve.env
+        value: development
+        action: upsert
+      - key: deployment.environment
+        value: development
+        action: upsert
+
+  # Filter out health check spans — they're noise
+  filter:
+    spans:
+      exclude:
+        match_type: strict
+        attributes:
+          - key: http.route
+            value: "/health"
+          - key: http.route
+            value: "/health/ready"
+
+exporters:
+  # Traces → Jaeger
+  otlp/jaeger:
+    endpoint: jaeger:4317
+    tls:
+      insecure: true
+
+  # Metrics → Prometheus scrape endpoint
+  prometheus:
+    endpoint: "0.0.0.0:8889"
+    namespace: nerve
+    send_timestamps: true
+    metric_expiration: 3m
+
+  # Debug logging in development
+  debug:
+    verbosity: basic
+    sampling_initial: 5
+    sampling_thereafter: 200
+
+extensions:
+  health_check:
+    endpoint: 0.0.0.0:13133
+  pprof:
+    endpoint: 0.0.0.0:1777
+  zpages:
+    endpoint: 0.0.0.0:55679
+
+service:
+  extensions: [health_check, pprof, zpages]
+  pipelines:
+    traces:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, filter, batch]
+      exporters: [otlp/jaeger, debug]
+    metrics:
+      receivers: [otlp]
+      processors: [memory_limiter, resource, batch]
+      exporters: [prometheus, debug]
+  telemetry:
+    logs:
+      level: warn
