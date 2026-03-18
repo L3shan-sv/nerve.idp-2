@@ -1,0 +1,110 @@
+global:
+  resolve_timeout: 5m
+  slack_api_url: "${SLACK_WEBHOOK_URL}"
+  pagerduty_url: "https://events.pagerduty.com/v2/enqueue"
+
+# ─────────────────────────────────────────────
+# Route tree
+# The freeze_deploys action label routes alerts
+# through the freeze receiver FIRST, then pages.
+# ─────────────────────────────────────────────
+route:
+  group_by: ["alertname", "service", "team"]
+  group_wait: 30s
+  group_interval: 5m
+  repeat_interval: 4h
+  receiver: slack-default
+
+  routes:
+    # Budget exhausted or critical burn rate → freeze deploys + page
+    - matchers:
+        - action = "freeze_deploys"
+      receiver: freeze-and-page
+      continue: false
+      group_wait: 0s      # no wait — freeze immediately
+
+    # High burn rate → page only
+    - matchers:
+        - severity = "page"
+      receiver: pagerduty-page
+      continue: true
+
+    # Medium burn rate → Jira ticket (via webhook)
+    - matchers:
+        - action = "create_ticket"
+      receiver: jira-ticket
+      continue: false
+
+    # Low burn rate / warnings → Slack only
+    - matchers:
+        - severity = "warning"
+      receiver: slack-default
+      continue: false
+
+receivers:
+  # ── Freeze deploys AND page ────────────────
+  - name: freeze-and-page
+    webhook_configs:
+      # Nerve IDP deploy freeze endpoint
+      # Uses idempotency_key to prevent duplicate freeze events
+      # from simultaneous multi-window alerts
+      - url: "http://nerve-gateway:8000/api/v1/services/{{ .GroupLabels.service_id }}/error-budget/freeze"
+        send_resolved: false
+        http_config:
+          bearer_token: "${NERVE_INTERNAL_TOKEN}"
+        max_alerts: 1
+    pagerduty_configs:
+      - service_key: "${PAGERDUTY_SERVICE_KEY}"
+        severity: critical
+        description: "{{ .GroupLabels.alertname }}: {{ .CommonAnnotations.summary }}"
+        details:
+          service: "{{ .GroupLabels.service }}"
+          team: "{{ .GroupLabels.team }}"
+          burn_rate: "{{ .GroupLabels.burn_rate }}"
+
+  # ── PagerDuty page only ────────────────────
+  - name: pagerduty-page
+    pagerduty_configs:
+      - service_key: "${PAGERDUTY_SERVICE_KEY}"
+        severity: "{{ .GroupLabels.severity }}"
+        description: "{{ .CommonAnnotations.summary }}"
+
+  # ── Slack default ──────────────────────────
+  - name: slack-default
+    slack_configs:
+      - channel: "#nerve-alerts"
+        username: "Nerve IDP"
+        icon_emoji: ":nerve:"
+        send_resolved: true
+        title: "{{ .GroupLabels.alertname }}"
+        text: |
+          *Service:* {{ .GroupLabels.service }}
+          *Team:* {{ .GroupLabels.team }}
+          *Summary:* {{ .CommonAnnotations.summary }}
+          *Description:* {{ .CommonAnnotations.description }}
+        actions:
+          - type: button
+            text: "Open Nerve IDP"
+            url: "http://localhost:5173"
+
+  # ── Jira ticket creation ───────────────────
+  - name: jira-ticket
+    webhook_configs:
+      - url: "${JIRA_WEBHOOK_URL}"
+        send_resolved: false
+
+inhibit_rules:
+  # If budget is exhausted, suppress the high/medium burn rate alerts
+  # — the exhaustion alert covers everything
+  - source_matchers:
+      - alertname = "NerveBudgetExhausted"
+    target_matchers:
+      - alertname =~ "NerveBurnRate.*"
+    equal: ["service"]
+
+  # If critical burn rate is firing, suppress lower severity burn rate alerts
+  - source_matchers:
+      - alertname = "NerveBurnRateCritical"
+    target_matchers:
+      - alertname =~ "NerveBurnRate(High|Medium|Low)"
+    equal: ["service"]
