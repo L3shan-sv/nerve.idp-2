@@ -1,0 +1,25 @@
+# Temporal dynamic config — development
+# This file is hot-reloaded by Temporal without restart
+
+system.forceSearchAttributesCacheRefreshOnRead:
+  - value: true
+    constraints: {}
+
+limit.maxIDLength:
+  - value: 255
+    constraints: {}
+
+# Increase workflow execution timeout for long-running IaC applies
+limit.workflowExecutionMaxAttempts:
+  - value: 10
+    constraints: {}
+
+# Allow larger history for scaffold and IaC workflows
+history.defaultWorkflowTaskTimeout:
+  - value: 10s
+    constraints: {}
+
+# Visibility settings
+system.enableReadFromSecondary:
+  - value: false
+    constraints: {}
