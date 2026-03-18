@@ -1,0 +1,60 @@
+# ── Secrets ──────────────────────────────────
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+vault-data/
+
+# ── Python ───────────────────────────────────
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+.venv/
+venv/
+env/
+*.egg-info/
+dist/
+build/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.log
+
+# ── Node ─────────────────────────────────────
+node_modules/
+frontend/dist/
+frontend/.vite/
+*.local
+
+# ── Docker ───────────────────────────────────
+# Don't ignore docker-compose override files — they're user-local
+docker-compose.override.yml
+
+# ── Kubernetes / Helm ─────────────────────────
+*.kubeconfig
+kubeconfig
+infra/helm/*/charts/
+infra/helm/*/Chart.lock
+
+# ── Terraform ────────────────────────────────
+.terraform/
+*.tfstate
+*.tfstate.backup
+*.tfvars
+!*.tfvars.example
+
+# ── IDE ──────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+.DS_Store
+
+# ── Generated ────────────────────────────────
+generated.json
